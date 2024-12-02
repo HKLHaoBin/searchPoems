@@ -6,15 +6,18 @@ import os
 from tqdm import tqdm
 from pymilvus import DataType, MilvusClient
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
+import requests  # 用于调用 Deepseek API
 
 class Searcher:
-    def __init__(self, config):
+    def __init__(self, config, api_key=None):
         self.embed_model = config.embedding.embed_model
         self.dim = config.embedding.dim
         self.uri = f"http://{config.milvus.host}:{config.milvus.port}"
         self.collection_name = config.milvus.collection_name
         self.limit = config.milvus.limit
-        # 创建Milvus实例
+        self.api_key = api_key  # Deepseek API 密钥
+
+        # 创建 Milvus 客户端
         self.milvus_client = MilvusClient(uri=self.uri)
 
     def create_collection(self, collection_name):
@@ -34,7 +37,7 @@ class Searcher:
             num_partitions=16,
             description=""
         )
-        # 添加字段到schema
+        # 添加字段到 schema
         schema.add_field(field_name="author", datatype=DataType.VARCHAR, max_length=64)
         schema.add_field(field_name="paragraphs", datatype=DataType.VARCHAR, max_length=1024)
         schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=1024)
@@ -68,37 +71,24 @@ class Searcher:
         vectors = bge_m3_ef.encode_documents(query)
         return vectors
 
-
-
     def get_files_from_dir(self, input_dir_path):
+        """从目录中获取所有 JSON 文件"""
         file_paths = []
-        # 遍历目录中的所有文件和子目录
         for root, dirs, files in os.walk(input_dir_path):
             for file in files:
-                # 检查文件扩展名是否为 .json
                 if file.endswith('.json'):
-                    # 构建文件的完整路径
                     file_path = os.path.join(root, file)
                     file_paths.append(file_path)
         return file_paths
 
-
-    def vectorize_and_import_data(
-        self, 
-        input_file_path, 
-        field_name, 
-        embed_model,
-        batch_size
-        ):
-        """读取json文件中的数据，向量化后，分批入库"""
+    def vectorize_and_import_data(self, input_file_path, field_name, embed_model, batch_size):
+        """向量化并导入数据"""
         with open(input_file_path, 'r', encoding='utf-8') as file:
             data_list = json.load(file)
-            # data_list = data_list[:1000]
-            # paragraphs字段的值是列表，需要变成字符串以符合Milvus的要求
             for data in data_list:
                 data[field_name] = data[field_name][0]
-            # 提取该json文件中的所有指定字段的值
             query = [data[field_name] for data in data_list]
+
         # 向量化文本数据
         vectors = self.vectorize_query(query)
         for data, dense_vectors in zip(data_list, vectors['dense']):
@@ -116,7 +106,6 @@ class Searcher:
 
     def create_index(self, collection_name):
         """创建索引"""
-        # 创建索引参数
         print("正在创建索引")
         index_params = self.milvus_client.prepare_index_params()
         index_params.add_index(
@@ -126,17 +115,14 @@ class Searcher:
             metric_type="COSINE",
             params={"nlist": 128}
         )
-        # 创建索引
         self.milvus_client.create_index(
             collection_name=self.collection_name,
             index_params=index_params
         )
         print("索引创建完成")
-        # 加载集合
         print(f"正在加载集合：{self.collection_name}")
         self.milvus_client.load_collection(collection_name=self.collection_name)
         state = str(self.milvus_client.get_load_state(collection_name=self.collection_name)['state'])
-        # 验证加载状态
         if state == 'Loaded':
             print("集合加载完成")
         else:
@@ -144,9 +130,7 @@ class Searcher:
 
     def create_vector_db(self):
         """创建向量数据库"""
-        # 创建集合
         self.create_collection(self.collection_name)
-        # 入库
         start_time = time.time()
         batch_size = 1000
         field_name = "paragraphs"
@@ -158,12 +142,25 @@ class Searcher:
         end_time = time.time()
         elapsed_time = end_time - start_time
         print(f"数据入库耗时：{elapsed_time:.2f} 秒")
-        # 创建索引
         self.create_index(self.collection_name)
 
     def search(self, query):
-        """搜索"""
-        # 创建搜索参数
+        """使用 Deepseek API 和 Milvus 进行搜索"""
+        if self.api_key:
+            # 如果提供了 API 密钥，先调用 Deepseek API 进行搜索
+            headers = {'Authorization': f'Bearer {self.api_key}'}
+            response = requests.post(
+                "https://api.deepseek.com/v1/search",
+                headers=headers,
+                json={"query": query}
+            )
+            if response.status_code == 200:
+                print(f"Deepseek API 返回：{response.json()}")
+                return response.json()['results']
+            else:
+                print(f"Deepseek API 错误：{response.status_code}")
+        
+        # 如果没有 API 密钥，继续使用 Milvus 进行传统向量搜索
         search_params = {
             "metric_type": "COSINE",
             "params": {
@@ -172,7 +169,6 @@ class Searcher:
                 "range_filter": 1
             }
         }
-        # 搜索向量
         query_vectors = [self.vectorize_query([query])['dense'][0].tolist()]
         res = self.milvus_client.search(
             collection_name=self.collection_name,
@@ -182,11 +178,10 @@ class Searcher:
             limit=self.limit,
             output_fields=["paragraphs", "title", "author"]
         )
-        # 打印搜索结果
         self.print_vector_results(res)
 
     def search_filter_by_author(self, query, author):
-        """搜索并且通过作者过滤"""
+        """根据作者进行过滤搜索"""
         search_params = {
             "metric_type": "COSINE",
             "params": {
@@ -195,7 +190,6 @@ class Searcher:
                 "range_filter": 1
             }
         }
-        # 搜索向量
         query_vectors = [self.vectorize_query([query])['dense'][0].tolist()]
         res = self.milvus_client.search(
             collection_name=self.collection_name,
@@ -206,7 +200,6 @@ class Searcher:
             output_fields=["paragraphs", "title", "author"],
             filter=f"author =='{author}'"
         )
-        # 打印搜索结果
         self.print_vector_results(res)
 
     def print_vector_results(self, res):
@@ -223,8 +216,8 @@ class Searcher:
                 })
         return results
 
-
     def delete_collection(self):
+        """删除集合"""
         if self.milvus_client.has_collection(self.collection_name):
             try:
                 self.milvus_client.drop_collection(self.collection_name)
