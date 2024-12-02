@@ -27,8 +27,16 @@ def handle_issue_comment(issue, comment_body):
     """处理 Issue 或评论中的搜索命令"""
     # 从配置文件中加载 Milvus 配置信息
     config = read_yaml_config('config.yaml')
-    searcher = Searcher(config)
-    
+
+    # 获取 Deepseek API 密钥并传递给 Searcher
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        print("Error: API key is missing. Please set DEEPSEEK_API_KEY in environment variables.")
+        return
+
+    # 实例化 Searcher，并传入 API 密钥
+    searcher = Searcher(config, api_key)
+
     # 执行搜索
     results = searcher.search(comment_body)
     
