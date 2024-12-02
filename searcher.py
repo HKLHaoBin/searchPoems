@@ -210,15 +210,19 @@ class Searcher:
         self.print_vector_results(res)
 
     def print_vector_results(self, res):
-        """打印搜索结果"""
+        """打印搜索结果并格式化为可返回的字符串"""
+        results = []
         for hits in res:
             for hit in hits:
                 entity = hit.get("entity")
-                print(f"title: {entity['title']}")
-                print(f"author: {entity['author']}")
-                print(f"paragraphs: {entity['paragraphs']}")
-                print(f"distance: {hit['distance']:.3f}")
-                print("-"*50)
+                results.append({
+                    "title": entity['title'],
+                    "author": entity['author'],
+                    "paragraphs": entity['paragraphs'],
+                    "distance": hit['distance']
+                })
+        return results
+
 
     def delete_collection(self):
         if self.milvus_client.has_collection(self.collection_name):
